@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gnome-shell --version)",
+      "Read(//usr/share/gnome-shell/extensions/**)"
+    ]
+  }
+}

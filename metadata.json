@@ -1,0 +1,9 @@
+{
+  "name": "Session Restore",
+  "description": "Save and restore window sessions: positions, sizes, workspaces, and states. Auto-saves on logout, restores on login.",
+  "uuid": "session-restore@guido.local",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1,
+  "settings-schema": "org.gnome.shell.extensions.session-restore",
+  "gettext-domain": "session-restore"
+}

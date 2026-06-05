@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.session-restore"
+          path="/org/gnome/shell/extensions/session-restore/">
+
+    <key name="auto-save-on-logout" type="b">
+      <default>true</default>
+      <summary>Auto-save session on logout</summary>
+      <description>Automatically save the session when logging out, restarting, or shutting down.</description>
+    </key>
+
+    <key name="auto-restore-on-login" type="b">
+      <default>true</default>
+      <summary>Auto-restore session on login</summary>
+      <description>Automatically reopen applications and restore window positions on login.</description>
+    </key>
+
+    <key name="restore-on-resume" type="b">
+      <default>false</default>
+      <summary>Restore session on resume from suspend</summary>
+      <description>Re-apply window positions when waking from suspend.</description>
+    </key>
+
+    <key name="restore-position" type="b">
+      <default>true</default>
+      <summary>Restore window position</summary>
+      <description>Move windows back to their saved screen position when restoring.</description>
+    </key>
+
+    <key name="restore-size" type="b">
+      <default>true</default>
+      <summary>Restore window size</summary>
+      <description>Resize windows to their saved dimensions when restoring.</description>
+    </key>
+
+    <key name="restore-workspace" type="b">
+      <default>true</default>
+      <summary>Restore workspace</summary>
+      <description>Move windows to their saved workspace when restoring.</description>
+    </key>
+
+    <key name="save-session-shortcut" type="as">
+      <default><![CDATA[['<Super><Shift>s']]]></default>
+      <summary>Keyboard shortcut to manually save the session</summary>
+    </key>
+
+    <key name="restore-session-shortcut" type="as">
+      <default><![CDATA[['<Super><Shift>r']]]></default>
+      <summary>Keyboard shortcut to manually restore the session</summary>
+    </key>
+
+  </schema>
+</schemalist>
