@@ -6,10 +6,12 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const SESSION_DIR = GLib.build_filenamev([GLib.get_user_data_dir(), 'gnome-session-restore']);
-const SESSION_FILE = GLib.build_filenamev([SESSION_DIR, 'session.json']);
+const SESSION_DIR   = GLib.build_filenamev([GLib.get_user_data_dir(), 'gnome-session-restore']);
+const SESSION_FILE  = GLib.build_filenamev([SESSION_DIR, 'session.json']);
+const SESSIONS_DIR  = GLib.build_filenamev([SESSION_DIR, 'sessions']);
 
 // Delay after login before attempting restore, to let the desktop settle.
 const LOGIN_RESTORE_DELAY_MS = 2000;
@@ -22,6 +24,8 @@ export default class SessionRestoreExtension extends Extension {
     _windowCreatedId = null;
     _suspendSubId = null;
     _indicator = null;
+    _namedSessionsSep = null;
+    _namedSessionsSection = null;
     // Map of wmClass (lowercase) -> Array<savedWindowState>, consumed as windows open.
     _pendingRestorations = new Map();
 
@@ -74,6 +78,8 @@ export default class SessionRestoreExtension extends Extension {
             this._indicator = null;
         }
 
+        this._namedSessionsSep = null;
+        this._namedSessionsSection = null;
         this._pendingRestorations.clear();
         this._settings = null;
     }
@@ -95,9 +101,25 @@ export default class SessionRestoreExtension extends Extension {
         saveItem.connect('activate', () => this._saveSession());
         this._indicator.menu.addMenuItem(saveItem);
 
+        const saveAsItem = new PopupMenu.PopupMenuItem('Save As…');
+        saveAsItem.connect('activate', () => this._showSaveAsDialog());
+        this._indicator.menu.addMenuItem(saveAsItem);
+
+        this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
         const restoreItem = new PopupMenu.PopupMenuItem('Restore Session');
         restoreItem.connect('activate', () => this._restoreSession());
         this._indicator.menu.addMenuItem(restoreItem);
+
+        this._namedSessionsSep = new PopupMenu.PopupSeparatorMenuItem('Named Sessions');
+        this._indicator.menu.addMenuItem(this._namedSessionsSep);
+
+        this._namedSessionsSection = new PopupMenu.PopupMenuSection();
+        this._indicator.menu.addMenuItem(this._namedSessionsSection);
+
+        this._indicator.menu.connect('open-state-changed', (_menu, open) => {
+            if (open) this._rebuildNamedSessionItems();
+        });
 
         Main.panel.addToStatusArea('session-restore', this._indicator);
     }
@@ -106,7 +128,7 @@ export default class SessionRestoreExtension extends Extension {
     // Save
     // -------------------------------------------------------------------------
 
-    _saveSession() {
+    _saveSession(filePath = SESSION_FILE) {
         const windows = [];
 
         for (const actor of global.get_window_actors()) {
@@ -133,16 +155,61 @@ export default class SessionRestoreExtension extends Extension {
             });
         }
 
+        const label = filePath === SESSION_FILE
+            ? 'Session'
+            : GLib.path_get_basename(filePath).replace(/\.json$/, '');
+
         try {
-            GLib.mkdir_with_parents(SESSION_DIR, 0o755);
+            GLib.mkdir_with_parents(GLib.path_get_dirname(filePath), 0o755);
             const payload = JSON.stringify({ timestamp: new Date().toISOString(), windows }, null, 2);
-            GLib.file_set_contents(SESSION_FILE, payload);
-            Main.notify('Session Restore', `Session saved — ${windows.length} window${windows.length !== 1 ? 's' : ''}`);
+            GLib.file_set_contents(filePath, payload);
+            Main.notify('Session Restore', `"${label}" saved — ${windows.length} window${windows.length !== 1 ? 's' : ''}`);
         } catch (e) {
             const msg = e.message ?? String(e);
             console.error('[SessionRestore] Failed to save session:', msg);
-            Main.notify('Session Restore', `Failed to save session: ${msg}`);
+            Main.notify('Session Restore', `Failed to save "${label}": ${msg}`);
         }
+    }
+
+    _saveNamedSession(name) {
+        const safe = name.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 100);
+        if (!safe) return;
+        this._saveSession(GLib.build_filenamev([SESSIONS_DIR, `${safe}.json`]));
+    }
+
+    _showSaveAsDialog() {
+        const dialog = new ModalDialog.ModalDialog({ destroyOnClose: true });
+
+        dialog.contentLayout.add_child(new St.Label({
+            text: 'Enter a name for this session:',
+            style: 'margin-bottom: 8px;',
+        }));
+
+        const entry = new St.Entry({
+            hint_text: 'e.g. Work, Home…',
+            can_focus: true,
+            x_expand: true,
+        });
+        dialog.contentLayout.add_child(entry);
+
+        const doSave = () => {
+            const name = entry.get_text().trim();
+            if (name) this._saveNamedSession(name);
+            dialog.close();
+        };
+
+        entry.clutter_text.connect('activate', doSave);
+
+        dialog.setButtons([
+            { label: 'Cancel', action: () => dialog.close() },
+            { label: 'Save',   action: doSave, isDefault: true },
+        ]);
+
+        dialog.open();
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            entry.grab_key_focus();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // -------------------------------------------------------------------------
@@ -150,9 +217,21 @@ export default class SessionRestoreExtension extends Extension {
     // -------------------------------------------------------------------------
 
     _restoreSession() {
-        const file = Gio.File.new_for_path(SESSION_FILE);
+        const defaultSession = this._settings.get_string('default-session');
+        if (defaultSession)
+            this._doRestore(GLib.build_filenamev([SESSIONS_DIR, `${defaultSession}.json`]), defaultSession);
+        else
+            this._doRestore(SESSION_FILE, 'Last Session');
+    }
+
+    _restoreNamedSession(name) {
+        this._doRestore(GLib.build_filenamev([SESSIONS_DIR, `${name}.json`]), name);
+    }
+
+    _doRestore(filePath, label = 'Session') {
+        const file = Gio.File.new_for_path(filePath);
         if (!file.query_exists(null)) {
-            Main.notify('Session Restore', 'No saved session found');
+            Main.notify('Session Restore', `No saved session found for "${label}"`);
             return;
         }
 
@@ -163,7 +242,7 @@ export default class SessionRestoreExtension extends Extension {
         } catch (e) {
             const msg = e.message ?? String(e);
             console.error('[SessionRestore] Failed to parse session file:', msg);
-            Main.notify('Session Restore', `Failed to load session file: ${msg}`);
+            Main.notify('Session Restore', `Failed to load "${label}": ${msg}`);
             return;
         }
 
@@ -188,7 +267,6 @@ export default class SessionRestoreExtension extends Extension {
             const existing = openByClass.get(key);
 
             if (existing?.length) {
-                // Reuse an already-open window — apply saved state to it directly.
                 const win = existing.shift();
                 if (existing.length === 0) openByClass.delete(key);
                 GLib.timeout_add(GLib.PRIORITY_DEFAULT, WINDOW_READY_DELAY_MS, () => {
@@ -197,7 +275,6 @@ export default class SessionRestoreExtension extends Extension {
                 });
                 repositioned++;
             } else {
-                // No existing window — launch a new instance and queue its state.
                 if (!this._pendingRestorations.has(key))
                     this._pendingRestorations.set(key, []);
                 this._pendingRestorations.get(key).push(state);
@@ -209,7 +286,37 @@ export default class SessionRestoreExtension extends Extension {
         const parts = [];
         if (repositioned > 0) parts.push(`${repositioned} repositioned`);
         if (launched > 0) parts.push(`${launched} launched`);
-        Main.notify('Session Restore', `Session restored — ${parts.join(', ')}`);
+        Main.notify('Session Restore', `"${label}" restored — ${parts.join(', ')}`);
+    }
+
+    _listNamedSessions() {
+        try {
+            const dir = Gio.File.new_for_path(SESSIONS_DIR);
+            if (!dir.query_exists(null)) return [];
+            const iter = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            const names = [];
+            let info;
+            while ((info = iter.next_file(null)) !== null) {
+                const fname = info.get_name();
+                if (fname.endsWith('.json')) names.push(fname.slice(0, -5));
+            }
+            iter.close(null);
+            return names.sort((a, b) => a.localeCompare(b));
+        } catch (e) {
+            console.error('[SessionRestore] Failed to list named sessions:', e.message);
+            return [];
+        }
+    }
+
+    _rebuildNamedSessionItems() {
+        this._namedSessionsSection.removeAll();
+        const names = this._listNamedSessions();
+        this._namedSessionsSep.visible = names.length > 0;
+        for (const name of names) {
+            const item = new PopupMenu.PopupMenuItem(name);
+            item.connect('activate', () => this._restoreNamedSession(name));
+            this._namedSessionsSection.addMenuItem(item);
+        }
     }
 
     _launchApp(state) {
@@ -311,7 +418,7 @@ export default class SessionRestoreExtension extends Extension {
             if (restorePosition || restoreSize)
                 window.move_resize_frame(true, x, y, width, height);
 
-            if ((restorePosition || restoreSize) && state.maximized)
+            if (state.maximized)
                 window.maximize(state.maximized);
         }
 

@@ -1,4 +1,6 @@
+import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import Gtk from 'gi://Gtk';
 import Adw from 'gi://Adw';
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -62,6 +64,33 @@ export default class SessionRestorePreferences extends ExtensionPreferences {
         settings.bind('restore-workspace', workspaceRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         restoreGroup.add(workspaceRow);
 
+        // --- Named sessions / default group ---
+        const sessionNames = this._listSessionNames();
+
+        const namedGroup = new Adw.PreferencesGroup({ title: _('Named Sessions') });
+        page.add(namedGroup);
+
+        const sessionModel = new Gtk.StringList();
+        sessionModel.append(_('Last Session'));
+        sessionNames.forEach(n => sessionModel.append(n));
+
+        const currentDefault = settings.get_string('default-session');
+        const defaultIdx = currentDefault
+            ? Math.max(0, sessionNames.indexOf(currentDefault) + 1)
+            : 0;
+
+        const defaultRow = new Adw.ComboRow({
+            title: _('Restore by default'),
+            subtitle: _('Used for auto-restore on login and the Restore keyboard shortcut'),
+            model: sessionModel,
+            selected: defaultIdx,
+        });
+        defaultRow.connect('notify::selected', () => {
+            const idx = defaultRow.selected;
+            settings.set_string('default-session', idx === 0 ? '' : sessionNames[idx - 1]);
+        });
+        namedGroup.add(defaultRow);
+
         // --- Shortcuts group ---
         const shortcutsGroup = new Adw.PreferencesGroup({
             title: _('Keyboard Shortcuts'),
@@ -79,6 +108,27 @@ export default class SessionRestorePreferences extends ExtensionPreferences {
             settings,
             'restore-session-shortcut'
         ));
+    }
+
+    _listSessionNames() {
+        const sessionsDir = GLib.build_filenamev([
+            GLib.get_user_data_dir(), 'gnome-session-restore', 'sessions',
+        ]);
+        try {
+            const dir = Gio.File.new_for_path(sessionsDir);
+            if (!dir.query_exists(null)) return [];
+            const iter = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            const names = [];
+            let info;
+            while ((info = iter.next_file(null)) !== null) {
+                const fname = info.get_name();
+                if (fname.endsWith('.json')) names.push(fname.slice(0, -5));
+            }
+            iter.close(null);
+            return names.sort((a, b) => a.localeCompare(b));
+        } catch (_e) {
+            return [];
+        }
     }
 
     _makeShortcutRow(title, settings, key) {

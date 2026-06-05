@@ -39,6 +39,12 @@
       <description>Move windows to their saved workspace when restoring.</description>
     </key>
 
+    <key name="default-session" type="s">
+      <default>''</default>
+      <summary>Default session to restore</summary>
+      <description>Name of the named session to restore by default. Empty string means the last auto-saved session.</description>
+    </key>
+
     <key name="save-session-shortcut" type="as">
       <default><![CDATA[['<Super><Shift>s']]]></default>
       <summary>Keyboard shortcut to manually save the session</summary>
