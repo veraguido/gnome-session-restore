@@ -23,6 +23,10 @@ export default class SessionRestoreExtension extends Extension {
     _settings = null;
     _windowCreatedId = null;
     _suspendSubId = null;
+    _shutdownSubId = null;
+    _gnomeSessionSubId = null;
+    _gnomeSessionClientPath = null;
+    _sessionSavedForExit = false;
     _indicator = null;
     _namedSessionsSep = null;
     _namedSessionsSection = null;
@@ -38,6 +42,7 @@ export default class SessionRestoreExtension extends Extension {
         );
 
         this._setupSuspendListener();
+        this._setupGnomeSessionListener();
         this._bindShortcuts();
         this._addPanelIndicator();
 
@@ -55,10 +60,13 @@ export default class SessionRestoreExtension extends Extension {
     }
 
     disable() {
-        // disable() is called on logout/restart/shutdown as well as manual disabling.
-        // Saving here covers the logout case; it is harmless on manual disable.
-        if (this._settings?.get_boolean('auto-save-on-logout'))
+        // Only save here if we haven't already saved via PrepareForShutdown or
+        // QueryEndSession. If we saved earlier, Chrome windows are in the file;
+        // saving again now would overwrite that with a Chrome-less snapshot.
+        if (this._settings?.get_boolean('auto-save-on-logout') && !this._sessionSavedForExit)
             this._saveSession();
+
+        this._sessionSavedForExit = false;
 
         Main.wm.removeKeybinding('save-session-shortcut');
         Main.wm.removeKeybinding('restore-session-shortcut');
@@ -71,6 +79,32 @@ export default class SessionRestoreExtension extends Extension {
         if (this._suspendSubId) {
             Gio.DBus.system.signal_unsubscribe(this._suspendSubId);
             this._suspendSubId = null;
+        }
+
+        if (this._shutdownSubId) {
+            Gio.DBus.system.signal_unsubscribe(this._shutdownSubId);
+            this._shutdownSubId = null;
+        }
+
+        if (this._gnomeSessionSubId) {
+            Gio.DBus.session.signal_unsubscribe(this._gnomeSessionSubId);
+            this._gnomeSessionSubId = null;
+        }
+
+        if (this._gnomeSessionClientPath) {
+            Gio.DBus.session.call(
+                'org.gnome.SessionManager',
+                '/org/gnome/SessionManager',
+                'org.gnome.SessionManager',
+                'UnregisterClient',
+                new GLib.Variant('(o)', [this._gnomeSessionClientPath]),
+                null,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                null,
+                null
+            );
+            this._gnomeSessionClientPath = null;
         }
 
         if (this._indicator) {
@@ -469,6 +503,79 @@ export default class SessionRestoreExtension extends Extension {
                         this._restoreSession();
                         return GLib.SOURCE_REMOVE;
                     });
+                }
+            }
+        );
+
+        // Save before shutdown/reboot, before gnome-session asks apps to close.
+        this._shutdownSubId = Gio.DBus.system.signal_subscribe(
+            'org.freedesktop.login1',
+            'org.freedesktop.login1.Manager',
+            'PrepareForShutdown',
+            '/org/freedesktop/login1',
+            null,
+            Gio.DBusSignalFlags.NONE,
+            (_conn, _sender, _path, _iface, _signal, params) => {
+                const [shuttingDown] = params.unpack();
+                if (shuttingDown && this._settings?.get_boolean('auto-save-on-logout') &&
+                    !this._sessionSavedForExit) {
+                    this._saveSession();
+                    this._sessionSavedForExit = true;
+                }
+            }
+        );
+    }
+
+    // Register as a gnome-session client so we receive QueryEndSession before
+    // applications are sent EndSession and begin closing their windows. This
+    // fires early enough that Chrome and its PWAs are still open.
+    _setupGnomeSessionListener() {
+        Gio.DBus.session.call(
+            'org.gnome.SessionManager',
+            '/org/gnome/SessionManager',
+            'org.gnome.SessionManager',
+            'RegisterClient',
+            new GLib.Variant('(ss)', ['org.gnome.shell.extensions.session-restore', '']),
+            new GLib.VariantType('(o)'),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            (conn, result) => {
+                if (!this._settings) return; // already disabled
+                try {
+                    const [pathVariant] = conn.call_finish(result).unpack();
+                    this._gnomeSessionClientPath = pathVariant.unpack();
+
+                    this._gnomeSessionSubId = Gio.DBus.session.signal_subscribe(
+                        'org.gnome.SessionManager',
+                        'org.gnome.SessionManager.ClientPrivate',
+                        'QueryEndSession',
+                        this._gnomeSessionClientPath,
+                        null,
+                        Gio.DBusSignalFlags.NONE,
+                        () => {
+                            if (this._settings?.get_boolean('auto-save-on-logout') &&
+                                !this._sessionSavedForExit) {
+                                this._saveSession();
+                                this._sessionSavedForExit = true;
+                            }
+                            // Acknowledge: we're ready for the session to end.
+                            Gio.DBus.session.call(
+                                'org.gnome.SessionManager',
+                                this._gnomeSessionClientPath,
+                                'org.gnome.SessionManager.ClientPrivate',
+                                'EndSessionResponse',
+                                new GLib.Variant('(bs)', [true, '']),
+                                null,
+                                Gio.DBusCallFlags.NONE,
+                                -1,
+                                null,
+                                null
+                            );
+                        }
+                    );
+                } catch (e) {
+                    console.error('[SessionRestore] Failed to register session client:', e.message);
                 }
             }
         );
