@@ -293,6 +293,14 @@ export default class SessionRestoreExtension extends Extension {
             openByClass.get(key).push(win);
         }
 
+        // If the main Chrome browser is absent and needs to be launched, Chrome's
+        // own crash-recovery restore will re-open PWA windows. Launching those
+        // PWAs directly would create duplicates, so we skip _launchApp for them
+        // and let _onWindowCreated apply their saved state when Chrome opens them.
+        const chromeWillRestoreSession = session.windows.some(
+            s => this._isChromeMainWindow(s) && !openByClass.has(s.wmClass.toLowerCase())
+        );
+
         let repositioned = 0;
         let launched = 0;
 
@@ -312,8 +320,12 @@ export default class SessionRestoreExtension extends Extension {
                 if (!this._pendingRestorations.has(key))
                     this._pendingRestorations.set(key, []);
                 this._pendingRestorations.get(key).push(state);
-                this._launchApp(state);
-                launched++;
+                if (chromeWillRestoreSession && this._isChromePwa(state)) {
+                    // Chrome's session restore will open this PWA; don't launch it.
+                } else {
+                    this._launchApp(state);
+                    launched++;
+                }
             }
         }
 
@@ -384,6 +396,19 @@ export default class SessionRestoreExtension extends Extension {
         }
 
         console.log(`[SessionRestore] No launcher found for: ${state.wmClass} (appId: ${state.appId})`);
+    }
+
+    _isChromeMainWindow(state) {
+        const cls = state.wmClass.toLowerCase();
+        return cls === 'google-chrome' || cls === 'google-chrome-stable' ||
+            cls === 'google-chrome-unstable' || cls === 'chromium' || cls === 'chromium-browser';
+    }
+
+    // Chrome PWA windows have appIds like "chrome-<hash>-Default".
+    _isChromePwa(state) {
+        return typeof state.appId === 'string' &&
+            state.appId.startsWith('chrome-') &&
+            state.appId.endsWith('-Default');
     }
 
     _onWindowCreated(window, retries = 0) {
